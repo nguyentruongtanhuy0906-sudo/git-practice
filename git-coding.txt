@@ -1,0 +1,4 @@
+Git la mot he thong quan ly phan tan
+Git la mot he thong quan ly
+Git commit
+Hello
