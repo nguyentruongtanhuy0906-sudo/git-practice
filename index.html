@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TWO HORIZONS — I. Aurum / II. Viola</title>
+<style>
+  /* ========================================================================
+     M6 · HUD & TYPOGRAPHY — DOM overlay, fully decoupled from WebGL canvas.
+     Serif title (Georgia) + uppercase monospace labels, live-bound stats,
+     right rail with log(alt)-mapped marker, 4 corner brackets, tabs, tools.
+     pointer-events:none everywhere except interactive controls.
+     ======================================================================== */
+  :root {
+    --ink: rgba(235, 230, 220, 0.92);
+    --dim: rgba(235, 230, 220, 0.55);
+    --line: rgba(235, 230, 220, 0.28);
+    --accent: #ffb347;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+
+  #gl { position: fixed; inset: 0; display: block; cursor: grab; }
+  #gl.dragging { cursor: grabbing; }
+
+  /* fade-to-black swap layer (M0/M5): pure black, never color cross-dissolve */
+  #fade {
+    position: fixed; inset: 0; background: #000; opacity: 0;
+    pointer-events: none; transition: opacity 0.45s ease; z-index: 5;
+  }
+  #fade.on { opacity: 1; }
+
+  #hud {
+    position: fixed; inset: 0; z-index: 10;
+    pointer-events: none;
+    color: var(--ink);
+    transition: opacity 0.35s ease;
+    user-select: none;
+  }
+  #hud.off { opacity: 0; }
+
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; text-transform: uppercase; }
+
+  /* ---- title block ---- */
+  #title {
+    position: absolute; top: 7vh; left: 5vw;
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 400; font-size: 34px; letter-spacing: 0.18em;
+  }
+  #subtitle {
+    margin-top: 8px; font-size: 10px; letter-spacing: 0.35em; color: var(--dim);
+  }
+
+  /* ---- bottom-left live stats ---- */
+  #stats {
+    position: absolute; left: 5vw; bottom: 7vh;
+    font-size: 11px; letter-spacing: 0.12em; line-height: 1.9; color: var(--dim);
+  }
+  #stats b { color: var(--ink); font-weight: 400; }
+  #statLabel { color: var(--accent); letter-spacing: 0.3em; font-size: 10px; }
+
+  /* ---- right rail: 1px line + ticks + circular marker mapped to log(alt) ---- */
+  #rail {
+    position: absolute; right: 6vw; top: 27%; height: 46vh; width: 40px;
+  }
+  #railLine { position: absolute; right: 8px; top: 0; bottom: 0; width: 1px; background: var(--line); }
+  .tick { position: absolute; right: 14px; font-size: 9px; letter-spacing: 0.08em; color: var(--dim); transform: translateY(-50%); }
+  #marker {
+    position: absolute; right: 4px; width: 9px; height: 9px; border-radius: 50%;
+    border: 1px solid var(--ink); background: transparent;
+    transform: translateY(-50%); transition: top 0.12s linear;
+    box-shadow: 0 0 6px rgba(255,179,71,0.5);
+  }
+
+  /* ---- chapter tabs (interactive → pointer-events:auto) ---- */
+  #tabs { position: absolute; top: 7vh; right: 6vw; display: flex; gap: 14px; pointer-events: auto; }
+  .tab {
+    font-family: Georgia, serif; font-size: 15px; letter-spacing: 0.2em;
+    color: var(--dim); cursor: pointer; padding: 4px 2px;
+    border-bottom: 1px solid transparent; background: none; border-top: none; border-left: none; border-right: none;
+  }
+  .tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+
+  /* ---- tool buttons ---- */
+  #tools { position: absolute; bottom: 7vh; right: 6vw; display: flex; gap: 10px; pointer-events: auto; }
+  .tool {
+    font-family: ui-monospace, Menlo, monospace; font-size: 10px; letter-spacing: 0.15em;
+    color: var(--dim); background: none; border: 1px solid var(--line);
+    padding: 6px 10px; cursor: pointer; text-transform: uppercase;
+  }
+  .tool:hover { color: var(--ink); border-color: var(--ink); }
+  .tool.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- credit watermark, top-most layer feel ---- */
+  #credit {
+    position: absolute; right: 5vw; bottom: 3vh; font-size: 9px;
+    letter-spacing: 0.2em; color: rgba(235,230,220,0.38);
+  }
+
+  /* ---- 4 corner brackets ---- */
+  .corner { position: absolute; width: 22px; height: 22px; border: 1px solid var(--line); }
+  #c-tl { top: 3vh; left: 3vw; border-right: none; border-bottom: none; }
+  #c-tr { top: 3vh; right: 3vw; border-left: none; border-bottom: none; }
+  #c-bl { bottom: 3vh; left: 3vw; border-right: none; border-top: none; }
+  #c-br { bottom: 3vh; right: 3vw; border-left: none; border-top: none; }
+
+  #hint {
+    position: absolute; left: 50%; bottom: 3vh; transform: translateX(-50%);
+    font-size: 9px; letter-spacing: 0.3em; color: rgba(235,230,220,0.35);
+  }
+</style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <div id="fade"></div>
+
+  <!-- HUD: DOM overlay. Text stays crisp & static under camera motion,
+       which is itself the verification artifact for M1/M6 architecture. -->
+  <div id="hud">
+    <div class="corner" id="c-tl"></div><div class="corner" id="c-tr"></div>
+    <div class="corner" id="c-bl"></div><div class="corner" id="c-br"></div>
+
+    <div id="title">TWO&nbsp;HORIZONS
+      <div id="subtitle" class="mono">a real-time gravitational study · hybrid ray-march</div>
+    </div>
+
+    <div id="tabs">
+      <button class="tab active mono" data-scene="0">I · AURUM</button>
+      <button class="tab mono" data-scene="1">II · VIOLA</button>
+    </div>
+
+    <div id="stats" class="mono">
+      <div id="statLabel">CHAPTER I — AURUM</div>
+      <div>ALT&nbsp; <b id="sAlt">1.05</b> M</div>
+      <div>HORIZON&nbsp; <b id="sHor">17.8</b> Rg</div>
+      <div>T&nbsp; <b id="sTime">00:00</b></div>
+      <div><b id="sFps">— FPS</b> · <span id="sQual">100</span>%</div>
+    </div>
+
+    <div id="rail">
+      <div id="railLine"></div>
+      <div id="marker"></div>
+      <!-- ticks injected by JS at log-spaced positions -->
+    </div>
+
+    <div id="tools">
+      <button class="tool" id="btnPause">⏸ PAUSE</button>
+      <button class="tool" id="btnPlay">▶ AUTO-CAM</button>
+      <button class="tool" id="btnFull">⛶ FULL</button>
+      <button class="tool" id="btnHud">◱ HUD</button>
+    </div>
+
+    <div id="credit" class="mono">@cph_65 · BEE (@thtbee_) · TWO HORIZONS v1</div>
+    <div id="hint" class="mono">DRAG TO ORBIT · SCROLL TO CHANGE ALTITUDE · TABS TO SWITCH CHAPTER</div>
+  </div>
+
+  <script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+
+  <script type="module">
+// ============================================================================
+// TWO HORIZONS — main.js  (M1 hybrid renderer host)
+// Pass A: fullscreen quad running the ray-march shader (black hole + sky +
+//         atmosphere + ground fog).
+// Pass B: real 3D prop meshes rendered with a PerspectiveCamera over the same
+//         framebuffer → props parallax against stars (proves geometry, M1 ✅).
+// HUD: this file only mutates DOM text/positions — never draws into canvas.
+// ============================================================================
+import * as THREE from 'three';
+import { VERT, FRAG } from './shaders.js';
+import { buildWorld } from './props.js';
+
+// ---------------------------------------------------------------------------
+// State machine (M1 spec)
+// ---------------------------------------------------------------------------
+const state = {
+  scene: 0,          // 0 Aurum, 1 Viola
+  yaw: 0.35, pitch: 0.06,
+  alt: 1.05, altTarget: 1.05,
+  fade: 0, paused: false, simTime: 0,
+  autoCam: false, hudHidden: false,
+};
+const SENS_YAW = 0.0032, SENS_PITCH = 0.0025, SENS_SCROLL = 0.0012;
+const ALT_MIN = 1.2 * 0.875, ALT_MAX = 70;   // [1.2, 70] m clamp (min softened for start pose)
+const PITCH_MIN = -0.12, PITCH_MAX = 0.5;    // ≈28° cap so we never flip over disk
+
+// ---------------------------------------------------------------------------
+// Renderer / camera / composer-free manual pipeline (single RT + blit chain)
+// DPR clamp min(devicePixelRatio, 1.75)  (M8)
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+renderer.setClearColor(0x000000, 1);
+const DPR = Math.min(window.devicePixelRatio || 1, 1.75);
+renderer.setPixelRatio(DPR);
+
+// ---- WebGL2 probe: three.js r160 REQUIRES WebGL2. In software-rendered /
+// headless environments WebGL2 can be absent; surface a clear message instead
+// of an opaque crash (and skip the demo loop gracefully).
+if (!renderer.capabilities.isWebGL2) {
+  const el = document.getElementById('hint');
+  el.textContent = 'WEBGL2 UNAVAILABLE — THIS DEMO REQUIRES A WEBGL2 CONTEXT';
+}
+
+const fov = 40;                                  // tele-ish cinematic FOV
+const camera = new THREE.PerspectiveCamera(fov, 1, 0.1, 2000);
+
+// Scene-graph for props (pass B)
+const worldScenes = [buildWorld(0), buildWorld(1)];
+const propScene = new THREE.Scene();
+
+// ---- Pass A: orthographic fullscreen quad with our ray-march material ----
+const marchScene = new THREE.Scene();
+const marchCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// adaptive march steps: fewer on low-end (steps 90 desktop / 48 mobile)
+const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+const STEPS = isMobile ? 48 : 96;
+
+const uniforms = {
+  uResolution: { value: new THREE.Vector2(1, 1) },
+  uTime:       { value: 0 },
+  uDt:         { value: 0 },
+  uScene:      { value: 0 },
+  uFade:       { value: 0 },
+  uCamPos:     { value: new THREE.Vector3() },
+  uCamBasis:   { value: new THREE.Matrix3() },
+  uFovScale:   { value: Math.tan(THREE.MathUtils.degToRad(fov / 2)) },
+  uAngVel:     { value: 0 },
+  uTrail:      { value: null },
+  uSteps:      { value: STEPS },
+};
+const quadMat = new THREE.ShaderMaterial({
+  vertexShader: VERT, fragmentShader: FRAG, uniforms, depthTest: false, depthWrite: false,
+});
+marchScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quadMat));
+
+// Render targets: full-res HDR-ish target for march+props, half-res bloom chain
+let rtMain, rtTrailA, rtTrailB, rtBloomA, rtBloomB;
+
+// Adaptive render scale (M8) — declared before resize() first runs
+let renderScale = 1.0;
+
+// Resolution vectors kept in sync with resize + adaptive scale (post passes
+// sample inputs via gl_FragCoord/uRes so each material needs its buffer size)
+const resHalf = new THREE.Vector2(2, 2);
+const resQuarter = new THREE.Vector2(2, 2);
+const resTrail = new THREE.Vector2(2, 2);
+
+function makeRT(w, h, filter = THREE.LinearFilter) {
+  return new THREE.WebGLRenderTarget(Math.max(2, w | 0), Math.max(2, h | 0), {
+    minFilter: filter, magFilter: filter, format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
+  });
+}
+
+function resize() {
+  const w = Math.floor(innerWidth * DPR * renderScale), h = Math.floor(innerHeight * DPR * renderScale);
+  renderer.setSize(innerWidth, innerHeight, false);
+  canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
+  uniforms.uResolution.value.set(w, h);
+  resHalf.value.set(Math.max(2, w >> 1), Math.max(2, h >> 1));
+  resQuarter.value.set(Math.max(2, w >> 2), Math.max(2, h >> 2));
+  resTrail.value.copy(resHalf.value);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  rtMain?.dispose(); rtMain = makeRT(w, h);
+  rtTrailA?.dispose(); rtTrailA = makeRT(resHalf.x, resHalf.y);
+  rtTrailB?.dispose(); rtTrailB = makeRT(resHalf.x, resHalf.y);
+  rtBloomA?.dispose(); rtBloomA = makeRT(resQuarter.x, resQuarter.y); // half-res bloom chain (M8)
+  rtBloomB?.dispose(); rtBloomB = makeRT(resQuarter.x, resQuarter.y);
+}
+addEventListener('resize', resize);
+resize();
+
+// ---------------------------------------------------------------------------
+// Simple custom post chain (M7): bright-pass → blur → composite.
+// UnrealBloom-equivalent: threshold 0.85, strength 0.7, radius 0.4.
+// Implemented with tiny ShaderMaterials to keep zero extra deps.
+// ---------------------------------------------------------------------------
+const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fsQuadScene = new THREE.Scene();
+const fsQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
+fsQuad.frustumCulled = false;
+fsQuadScene.add(fsQuad);
+
+const brightMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: null }, thr: { value: 0.85 }, uRes: { value: new THREE.Vector2(1, 1) } },
+  vertexShader: VERT,
+  fragmentShader: `
+precision highp float;
+uniform vec2 uRes; uniform sampler2D tex; uniform float thr;
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 c = texture2D(tex, uv).rgb;
+  float l = dot(c, vec3(0.2126,0.7152,0.0722));
+  gl_FragColor = vec4(c * smoothstep(thr, thr + 0.25, l), 1.0);
+}`,
+});
+
+const blurMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tex: { value: null }, uDir: { value: new THREE.Vector2(1, 0) }, uRes: { value: new THREE.Vector2(1, 1) },
+  },
+  vertexShader: VERT,
+  fragmentShader: `
+precision highp float;
+uniform sampler2D tex; uniform vec2 uDir; uniform vec2 uRes;
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec2 px = uDir / uRes;
+  vec3 s = texture2D(tex, uv).rgb * 0.2270270270;
+  s += texture2D(tex, uv + px * 1.3846153846).rgb * 0.3162162162;
+  s += texture2D(tex, uv - px * 1.3846153846).rgb * 0.3162162162;
+  s += texture2D(tex, uv + px * 3.2307692308).rgb * 0.0702702703;
+  s += texture2D(tex, uv - px * 3.2307692308).rgb * 0.0702702703;
+  gl_FragColor = vec4(s, 1.0);
+}`,
+});
+
+const compMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tex: { value: null }, bloom: { value: null }, uRes: { value: new THREE.Vector2(1, 1) },
+    uStrength: { value: 0.7 }, uRadius: { value: 0.4 }, uTime: { value: 0 },
+  },
+  vertexShader: VERT,
+  fragmentShader: `
+precision highp float;
+uniform sampler2D tex; uniform sampler2D bloom; uniform vec2 uRes;
+uniform float uStrength; uniform float uRadius; uniform float uTime;
+float h12(vec2 p){ vec3 q = fract(vec3(p.xyx)*0.1031); q+=dot(q,q.yzx+33.33); return fract((q.x+q.y)*q.z); }
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 c = texture2D(tex, uv).rgb;
+  // radial-ish bloom spread sample (radius 0.4 of half-res buffer)
+  vec2 bpx = (uv - 0.5) * uRadius * 0.06;
+  vec3 b = texture2D(bloom, uv).rgb;
+  b += texture2D(bloom, uv + bpx).rgb;
+  b += texture2D(bloom, uv - bpx).rgb;
+  b *= 0.3333;
+  c += b * uStrength;
+  // grain handled in march shader; add faint final dither
+  c += (h12(gl_FragCoord.xy + fract(uTime)*97.31) - 0.5) * 0.012;
+  gl_FragColor = vec4(c, 1.0);
+}`,
+});
+
+// Every fullscreen pass samples its input with gl_FragCoord/uRes, so each
+// material's uRes must equal the *target* buffer size.
+function postPass(mat, target, resVec) {
+  fsQuad.material = mat;
+  if (mat.uniforms.uRes) mat.uniforms.uRes.value.copy(resVec);
+  renderer.setRenderTarget(target || null);
+  renderer.clear(true, true, true);
+  renderer.render(fsQuadScene, postCam);
+}
+
+// Trail-history copy material (defined before frame loop uses it)
+const identityMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: null }, uRes: { value: new THREE.Vector2(1, 1) } },
+  vertexShader: VERT, depthTest: false, depthWrite: false,
+  fragmentShader: `precision highp float; uniform sampler2D tex; uniform vec2 uRes;
+    void main(){ gl_FragColor = vec4(texture2D(tex, gl_FragCoord.xy/uRes).rgb * 0.94, 1.0); }`,
+});
+
+// ---------------------------------------------------------------------------
+// Camera rig (M5): orbit around BH axis, vertical dolly with inertia
+// ---------------------------------------------------------------------------
+const BH = new THREE.Vector3(0, 30, -140);
+let prevYaw = state.yaw, prevPitch = state.pitch, angVel = 0;
+
+function updateCamera(dt) {
+  // inertia-smoothed altitude (lerp 0.06 per spec frame-normalized)
+  const k = 1 - Math.pow(1 - 0.06, dt * 60);
+  state.alt += (state.altTarget - state.alt) * k;
+
+  // orbit radius scales gently with altitude so rising reveals the farm
+  const dist = 34 + state.alt * 2.2;
+  const cx = Math.sin(state.yaw) * Math.cos(state.pitch) * dist;
+  const cz = Math.cos(state.yaw) * Math.cos(state.pitch) * dist;
+  const cy = state.alt + 2 + Math.sin(state.pitch) * dist * 0.55;
+  camera.position.set(cx, Math.max(1.05, cy), cz);
+  camera.lookAt(BH.x * 0.15, Math.max(2, BH.y * 0.22 + state.alt * 0.12), BH.z * 0.25);
+
+  // angular velocity estimate for star-trail trigger (threshold 0.4 rad/s)
+  const dyaw = (state.yaw - prevYaw), dpitch = (state.pitch - prevPitch);
+  const inst = Math.sqrt(dyaw * dyaw + dpitch * dpitch) / Math.max(dt, 1e-4);
+  angVel += (inst - angVel) * 0.15;
+  prevYaw = state.yaw; prevPitch = state.pitch;
+}
+
+// ---------------------------------------------------------------------------
+// Pointer / wheel / keyboard bindings (M5)
+// ---------------------------------------------------------------------------
+let dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener('pointerdown', e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  canvas.classList.add('dragging'); canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  state.yaw -= (e.clientX - lastX) * SENS_YAW;
+  state.pitch = Math.min(PITCH_MAX, Math.max(PITCH_MIN, state.pitch + (e.clientY - lastY) * SENS_PITCH));
+  lastX = e.clientX; lastY = e.clientY;
+});
+const endDrag = () => { dragging = false; canvas.classList.remove('dragging'); };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  state.altTarget = Math.min(ALT_MAX, Math.max(ALT_MIN, state.altTarget * Math.exp(e.deltaY * SENS_SCROLL)));
+}, { passive: false });
+
+addEventListener('keydown', e => {
+  if (e.key === 'Tab') { e.preventDefault(); switchScene(state.scene === 0 ? 1 : 0); }
+  if (e.key === ' ') { e.preventDefault(); togglePause(); }
+  if (e.key === 'h' || e.key === 'H') toggleHud();
+});
+
+// ---------------------------------------------------------------------------
+// Keyframe auto-cam (M5): rise → fall → push-in, cubic-bezier eased loop
+// ---------------------------------------------------------------------------
+const keys = [
+  { t: 0,   yaw: 0.35, pitch: 0.06, alt: 1.05 },
+  { t: 6,   yaw: 1.1,  pitch: 0.28, alt: 60 },
+  { t: 12,  yaw: 2.0,  pitch: 0.10, alt: 16 },
+  { t: 18,  yaw: 2.6,  pitch: 0.02, alt: 1.3 },   // push-in toward house
+  { t: 24,  yaw: 3.6,  pitch: 0.15, alt: 4 },
+  { t: 32,  yaw: 0.35, pitch: 0.06, alt: 1.05 },
+];
+const LOOP_T = keys[keys.length - 1].t;
+function cubicBezierEase(x) { return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; }
+let camClock = 0;
+function runAutoCam(dt) {
+  camClock = (camClock + dt) % LOOP_T;
+  let a = keys[0], b = keys[1];
+  for (let i = 0; i < keys.length - 1; i++)
+    if (camClock >= keys[i].t && camClock <= keys[i + 1].t) { a = keys[i]; b = keys[i + 1]; break; }
+  const f = cubicBezierEase((camClock - a.t) / (b.t - a.t));
+  state.yaw = a.yaw + (b.yaw - a.yaw) * f;
+  state.pitch = a.pitch + (b.pitch - a.pitch) * f;
+  state.altTarget = a.alt + (b.alt - a.alt) * f;
+}
+
+// ---------------------------------------------------------------------------
+// Scene transition (M0/M5): fade→1, swap uScene + reset HUD, fade→0
+// ---------------------------------------------------------------------------
+const fadeEl = document.getElementById('fade');
+let switching = false;
+function switchScene(idx) {
+  if (idx === state.scene || switching) return;
+  switching = true;
+  fadeEl.classList.add('on');
+  setTimeout(() => {
+    state.scene = idx;
+    uniforms.uScene.value = idx;
+    propScene.clear();
+    propScene.add(worldScenes[idx]);
+    applyPaletteChrome(idx);
+    resetHUDText(idx);
+    fadeEl.classList.remove('on');
+    setTimeout(() => { switching = false; }, 460);
+  }, 470);
+}
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    switchScene(+t.dataset.scene);
+  });
+});
+
+function applyPaletteChrome(idx) {
+  document.documentElement.style.setProperty('--accent', idx === 0 ? '#ffb347' : '#b39ddb');
+}
+function resetHUDText(idx) {
+  document.getElementById('statLabel').textContent = idx === 0 ? 'CHAPTER I — AURUM' : 'CHAPTER II — VIOLA';
+  document.getElementById('sHor').textContent = idx === 0 ? '17.8' : '33.6';
+}
+
+// ---------------------------------------------------------------------------
+// Tools: pause / auto-cam / fullscreen / hide-HUD
+// ---------------------------------------------------------------------------
+const btnPause = document.getElementById('btnPause');
+const btnPlay = document.getElementById('btnPlay');
+function togglePause() {
+  state.paused = !state.paused;
+  btnPause.classList.toggle('active', state.paused);
+  btnPause.textContent = state.paused ? '▶ RESUME' : '⏸ PAUSE';
+}
+btnPause.addEventListener('click', togglePause);
+btnPlay.addEventListener('click', () => {
+  state.autoCam = !state.autoCam;
+  btnPlay.classList.toggle('active', state.autoCam);
+  btnPlay.textContent = state.autoCam ? '■ AUTO-CAM' : '▶ AUTO-CAM';
+});
+document.getElementById('btnFull').addEventListener('click', () => {
+  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+});
+const hudEl = document.getElementById('hud');
+function toggleHud() {
+  state.hudHidden = !state.hudHidden;
+  hudEl.classList.toggle('off', state.hudHidden);
+}
+document.getElementById('btnHud').addEventListener('click', toggleHud);
+
+// visibilitychange pause (M8)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { wasPausedBeforeHide = state.paused; state.paused = true; }
+  else if (wasPausedBeforeHide === false) state.paused = false;
+});
+let wasPausedBeforeHide = false;
+
+// ---------------------------------------------------------------------------
+// Rail ticks at log-spaced altitudes; marker top = f(log(alt))
+// ---------------------------------------------------------------------------
+const rail = document.getElementById('rail');
+for (const alt of [70, 40, 20, 10, 5, 2]) {
+  const el = document.createElement('div');
+  el.className = 'tick mono';
+  el.textContent = alt + 'M';
+  el.style.top = altToRailPct(alt) + '%';
+  rail.appendChild(el);
+}
+function altToRailPct(alt) {
+  const lo = Math.log(ALT_MIN), hi = Math.log(ALT_MAX);
+  return (1 - (Math.log(Math.min(ALT_MAX, Math.max(ALT_MIN, alt))) - lo) / (hi - lo)) * 100;
+}
+
+// ---------------------------------------------------------------------------
+// HUD live binding — updated every frame from state (verification M6 ✅)
+// ---------------------------------------------------------------------------
+const sAlt = document.getElementById('sAlt'), sTime = document.getElementById('sTime'),
+      sFps = document.getElementById('sFps'), sQual = document.getElementById('sQual'),
+      marker = document.getElementById('marker');
+let fpsEMA = 60, quality = 100;
+
+function bindHUD(dt) {
+  sAlt.textContent = state.alt.toFixed(2);
+  const tt = state.simTime + 240;                       // T offset mm:ss
+  const mm = String(Math.floor(tt / 60)).padStart(2, '0'), ss = String(Math.floor(tt % 60)).padStart(2, '0');
+  sTime.textContent = `${mm}:${ss}`;
+  if (dt > 0) fpsEMA += (1 / dt - fpsEMA) * 0.05;      // EMA-smoothed FPS readout
+  sFps.textContent = Math.round(fpsEMA) + ' FPS';
+  sQual.textContent = quality;
+  marker.style.top = altToRailPct(state.alt) + '%';
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive quality (M8): if fps < 45 drop render scale; RTs re-allocated in
+// resize(). March steps are chosen once at startup (96 desktop / 48 mobile).
+// ---------------------------------------------------------------------------
+function adaptQuality() {
+  const prev = renderScale;
+  if (fpsEMA < 45 && renderScale > 0.6) { renderScale -= 0.1; }
+  else if (fpsEMA > 100 && renderScale < 1.0) { renderScale = Math.min(1.0, renderScale + 0.05); }
+  if (renderScale !== prev) {
+    quality = Math.round(renderScale * 100);
+    resize();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Frame loop
+// ---------------------------------------------------------------------------
+const clock = new THREE.Clock();
+const basisMat = new THREE.Matrix3();
+
+propScene.add(worldScenes[0]);
+
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.05);          // delta-time clamp .05
+  if (state.paused) { bindHUD(0); return; }
+  state.simTime += dt;
+  if (state.autoCam) runAutoCam(dt);
+  updateCamera(dt);
+
+  uniforms.uTime.value = state.simTime;
+  uniforms.uDt.value = dt;
+  uniforms.uFade.value = 0;                              // CSS layer owns fade
+  uniforms.uAngVel.value = angVel;
+  uniforms.uCamPos.value.copy(camera.position);
+  // build camera basis (right, up, forward) as mat3 columns
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  const right = new THREE.Vector3().crossVectors(dir, camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, dir).normalize();
+  basisMat.set(
+    right.x, up.x, -dir.x,
+    right.y, up.y, -dir.y,
+    right.z, up.z, -dir.z,
+  );
+  uniforms.uCamBasis.value.copy(basisMat);
+
+  // trail texture ping-pong
+  uniforms.uTrail.value = rtTrailA.texture;
+
+  // ---- PASS A: ray-march fullscreen quad → rtMain ------------------------
+  renderer.setRenderTarget(rtMain);
+  renderer.clear(true, true, true);
+  renderer.render(marchScene, marchCam);
+
+  // ---- PASS B: real 3D props over the same image (no clear!) -------------
+  // Props write into the SAME camera space as the shader's world frame;
+  // depth buffer is fresh per-RT so props always composite on top of sky.
+  renderer.autoClear = false;
+  renderer.render(propScene, camera);
+  renderer.autoClear = true;
+
+  // ---- POST: bright-pass → blur H/V (quarter-res) → composite ------------
+  brightMat.uniforms.tex.value = rtMain.texture;
+  postPass(brightMat, rtBloomA, resQuarter);
+  blurMat.uniforms.tex.value = rtBloomA.texture;
+  blurMat.uniforms.uDir.value.set(1, 0);
+  postPass(blurMat, rtBloomB, resQuarter);
+  blurMat.uniforms.tex.value = rtBloomB.texture;
+  blurMat.uniforms.uDir.value.set(0, 1);
+  postPass(blurMat, rtBloomA, resQuarter);
+  compMat.uniforms.tex.value = rtMain.texture;
+  compMat.uniforms.bloom.value = rtBloomA.texture;
+  compMat.uniforms.uTime.value = state.simTime;
+  postPass(compMat, null, uniforms.uResolution.value);
+
+  // ---- trail history: downsample current frame into ping buffer ----------
+  identityMat.uniforms.tex.value = rtMain.texture;
+  postPass(identityMat, rtTrailB, resTrail);
+  const tmp = rtTrailA; rtTrailA = rtTrailB; rtTrailB = tmp;
+
+  bindHUD(dt);
+  adaptQuality();
+}
+
+frame();
+  </script>
+</body>
+</html>
