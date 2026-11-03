@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TWO HORIZONS — I. Aurum / II. Viola</title>
+<style>
+  /* ========================================================================
+     M6 · HUD & TYPOGRAPHY — DOM overlay, fully decoupled from WebGL canvas.
+     Serif title (Georgia) + uppercase monospace labels, live-bound stats,
+     right rail with log(alt)-mapped marker, 4 corner brackets, tabs, tools.
+     pointer-events:none everywhere except interactive controls.
+     ======================================================================== */
+  :root {
+    --ink: rgba(235, 230, 220, 0.92);
+    --dim: rgba(235, 230, 220, 0.55);
+    --line: rgba(235, 230, 220, 0.28);
+    --accent: #ffb347;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+
+  #gl { position: fixed; inset: 0; display: block; cursor: grab; }
+  #gl.dragging { cursor: grabbing; }
+
+  /* fade-to-black swap layer (M0/M5): pure black, never color cross-dissolve */
+  #fade {
+    position: fixed; inset: 0; background: #000; opacity: 0;
+    pointer-events: none; transition: opacity 0.45s ease; z-index: 5;
+  }
+  #fade.on { opacity: 1; }
+
+  #hud {
+    position: fixed; inset: 0; z-index: 10;
+    pointer-events: none;
+    color: var(--ink);
+    transition: opacity 0.35s ease;
+    user-select: none;
+  }
+  #hud.off { opacity: 0; }
+
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; text-transform: uppercase; }
+
+  /* ---- title block ---- */
+  #title {
+    position: absolute; top: 7vh; left: 5vw;
+    font-family: Georgia, "Times New Roman", serif;
+    font-weight: 400; font-size: 34px; letter-spacing: 0.18em;
+  }
+  #subtitle {
+    margin-top: 8px; font-size: 10px; letter-spacing: 0.35em; color: var(--dim);
+  }
+
+  /* ---- bottom-left live stats ---- */
+  #stats {
+    position: absolute; left: 5vw; bottom: 7vh;
+    font-size: 11px; letter-spacing: 0.12em; line-height: 1.9; color: var(--dim);
+  }
+  #stats b { color: var(--ink); font-weight: 400; }
+  #statLabel { color: var(--accent); letter-spacing: 0.3em; font-size: 10px; }
+
+  /* ---- right rail: 1px line + ticks + circular marker mapped to log(alt) ---- */
+  #rail {
+    position: absolute; right: 6vw; top: 27%; height: 46vh; width: 40px;
+  }
+  #railLine { position: absolute; right: 8px; top: 0; bottom: 0; width: 1px; background: var(--line); }
+  .tick { position: absolute; right: 14px; font-size: 9px; letter-spacing: 0.08em; color: var(--dim); transform: translateY(-50%); }
+  #marker {
+    position: absolute; right: 4px; width: 9px; height: 9px; border-radius: 50%;
+    border: 1px solid var(--ink); background: transparent;
+    transform: translateY(-50%); transition: top 0.12s linear;
+    box-shadow: 0 0 6px rgba(255,179,71,0.5);
+  }
+
+  /* ---- chapter tabs (interactive → pointer-events:auto) ---- */
+  #tabs { position: absolute; top: 7vh; right: 6vw; display: flex; gap: 14px; pointer-events: auto; }
+  .tab {
+    font-family: Georgia, serif; font-size: 15px; letter-spacing: 0.2em;
+    color: var(--dim); cursor: pointer; padding: 4px 2px;
+    border-bottom: 1px solid transparent; background: none; border-top: none; border-left: none; border-right: none;
+  }
+  .tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+
+  /* ---- tool buttons ---- */
+  #tools { position: absolute; bottom: 7vh; right: 6vw; display: flex; gap: 10px; pointer-events: auto; }
+  .tool {
+    font-family: ui-monospace, Menlo, monospace; font-size: 10px; letter-spacing: 0.15em;
+    color: var(--dim); background: none; border: 1px solid var(--line);
+    padding: 6px 10px; cursor: pointer; text-transform: uppercase;
+  }
+  .tool:hover { color: var(--ink); border-color: var(--ink); }
+  .tool.active { color: var(--accent); border-color: var(--accent); }
+
+  /* ---- credit watermark, top-most layer feel ---- */
+  #credit {
+    position: absolute; right: 5vw; bottom: 3vh; font-size: 9px;
+    letter-spacing: 0.2em; color: rgba(235,230,220,0.38);
+  }
+
+  /* ---- 4 corner brackets ---- */
+  .corner { position: absolute; width: 22px; height: 22px; border: 1px solid var(--line); }
+  #c-tl { top: 3vh; left: 3vw; border-right: none; border-bottom: none; }
+  #c-tr { top: 3vh; right: 3vw; border-left: none; border-bottom: none; }
+  #c-bl { bottom: 3vh; left: 3vw; border-right: none; border-top: none; }
+  #c-br { bottom: 3vh; right: 3vw; border-left: none; border-top: none; }
+
+  #hint {
+    position: absolute; left: 50%; bottom: 3vh; transform: translateX(-50%);
+    font-size: 9px; letter-spacing: 0.3em; color: rgba(235,230,220,0.35);
+  }
+</style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <div id="fade"></div>
+
+  <!-- HUD: DOM overlay. Text stays crisp & static under camera motion,
+       which is itself the verification artifact for M1/M6 architecture. -->
+  <div id="hud">
+    <div class="corner" id="c-tl"></div><div class="corner" id="c-tr"></div>
+    <div class="corner" id="c-bl"></div><div class="corner" id="c-br"></div>
+
+    <div id="title">TWO&nbsp;HORIZONS
+      <div id="subtitle" class="mono">a real-time gravitational study · hybrid ray-march</div>
+    </div>
+
+    <div id="tabs">
+      <button class="tab active mono" data-scene="0">I · AURUM</button>
+      <button class="tab mono" data-scene="1">II · VIOLA</button>
+    </div>
+
+    <div id="stats" class="mono">
+      <div id="statLabel">CHAPTER I — AURUM</div>
+      <div>ALT&nbsp; <b id="sAlt">1.05</b> M</div>
+      <div>HORIZON&nbsp; <b id="sHor">17.8</b> Rg</div>
+      <div>T&nbsp; <b id="sTime">00:00</b></div>
+      <div><b id="sFps">— FPS</b> · <span id="sQual">100</span>%</div>
+    </div>
+
+    <div id="rail">
+      <div id="railLine"></div>
+      <div id="marker"></div>
+      <!-- ticks injected by JS at log-spaced positions -->
+    </div>
+
+    <div id="tools">
+      <button class="tool" id="btnPause">⏸ PAUSE</button>
+      <button class="tool" id="btnPlay">▶ AUTO-CAM</button>
+      <button class="tool" id="btnFull">⛶ FULL</button>
+      <button class="tool" id="btnHud">◱ HUD</button>
+    </div>
+
+    <div id="credit" class="mono">@cph_65 · BEE (@thtbee_) · TWO HORIZONS v1</div>
+    <div id="hint" class="mono">DRAG TO ORBIT · SCROLL TO CHANGE ALTITUDE · TABS TO SWITCH CHAPTER</div>
+  </div>
+
+  <script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+
+  <script>
+if (typeof THREE === 'undefined') { throw new Error('three.js UMD failed to load'); }
+const VERT = `
+precision highp float;
+void main() {
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+const FRAG = `
+precision highp float;
+
+uniform vec2  uResolution;
+uniform float uTime;          // sim time (seconds)
+uniform float uDt;            // frame delta (clamped)
+uniform int   uScene;         // 0 = Aurum, 1 = Viola
+uniform float uFade;          // 0..1 fade-to-black overlay amount
+uniform vec3  uCamPos;        // world-space camera position
+uniform mat3  uCamBasis;      // columns: right, up, forward
+uniform float uFovScale;      // tan(fov/2)
+uniform float uAngVel;        // camera angular velocity (rad/s) for star trails
+uniform sampler2D uTrail;     // ping-pong trail accumulation texture
+uniform int   uSteps;         // adaptive ray-march budget (96 desktop / 48 mobile)
+
+#define PI  3.14159265359
+#define TAU 6.28318530718
+
+// ---------------------------------------------------------------------------
+// Black hole parameters (M2 spec)
+// ---------------------------------------------------------------------------
+const float RS      = 11.0;   // schwarzschild radius
+const float R_IN    = 24.0;   // disk inner radius
+const float R_OUT   = 95.0;   // disk outer radius
+const float BH_RIN  = 1.5 * RS; // photon sphere radius (ring glow source)
+
+// ---------------------------------------------------------------------------
+// Palette lock (M0): Aurum amber/gold vs Viola lavender/violet + single red
+// ---------------------------------------------------------------------------
+vec3 palDiskA(int s) { return s == 0 ? vec3(1.00, 0.70, 0.28) : vec3(0.85, 0.88, 1.00); }
+vec3 palDiskB(int s) { return s == 0 ? vec3(1.00, 0.42, 0.09) : vec3(0.55, 0.42, 0.78); }
+vec3 palSkyA (int s) { return s == 0 ? vec3(0.030, 0.020, 0.012) : vec3(0.020, 0.016, 0.034); }
+vec3 palGndA (int s) { return s == 0 ? vec3(0.10, 0.070, 0.030) : vec3(0.075, 0.050, 0.115); }
+vec3 palGndB (int s) { return s == 0 ? vec3(0.32, 0.220, 0.080) : vec3(0.36, 0.270, 0.520); }
+vec3 palFog  (int s) { return s == 0 ? vec3(0.16, 0.100, 0.040) : vec3(0.13, 0.100, 0.200); }
+float fogDensity(int s) { return s == 0 ? 0.012 : 0.010; }
+
+// ---------------------------------------------------------------------------
+// Hash / noise helpers
+// ---------------------------------------------------------------------------
+float hash11(float p) { p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
+float hash12(vec2 p)  { vec3 q = fract(vec3(p.xyx) * 0.1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+vec2  hash22(vec2 p)  { vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973)); q += dot(q, q.yzx + 33.33); return fract((q.xx + q.zz) * q.zz); }
+float hash13(vec3 p)  { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash12(i), b = hash12(i + vec2(1, 0)), c = hash12(i + vec2(0, 1)), d = hash12(i + vec2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+// swirlOctaves = 4 (M2 parameter)
+float fbm2(vec2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 4; i++) { v += a * vnoise(p); p = p * 2.07 + vec2(1.7); a *= 0.5; }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// Star field on the sky dome (hashed points over direction + twinkle)
+// ---------------------------------------------------------------------------
+vec3 stars(vec3 dir, float t) {
+    vec3 col = vec3(0.0);
+    // three octaves of cell-projected points on the sphere
+    for (int o = 0; o < 3; o++) {
+        float scale = 140.0 * pow(2.3, float(o));
+        vec3 sp = dir * scale;
+        vec3 ip = floor(sp);
+        vec3 fp = fract(sp) - 0.5;
+        vec3 h = hash22(ip.xy + ip.z * 71.3 + float(o) * 13.7).zzx; // placeholder reuse
+        // proper 3-cell hash:
+        float hh = hash13(ip);
+        if (hh > 0.965 - float(o) * 0.004) {
+            vec2 off = (hash22(ip.xy * 1.3 + ip.z * 7.7) - 0.5) * 0.7;
+            vec2 off2 = (hash22(ip.zy * 2.1 + ip.x * 3.3) - 0.5) * 0.7;
+            vec3 pt = vec3(off.x, off.y * 0.5 + off2.y, off2.x) ;
+            float d = length(fp - pt * 0.6);
+            float tw = 0.6 + 0.4 * sin(t * (1.0 + 6.0 * hash13(ip + 3.1)) + hh * TAU);
+            float b = smoothstep(0.07, 0.0, d) * tw;
+            float temp = hash13(ip + 9.0);
+            vec3 sc = mix(vec3(0.8, 0.85, 1.0), vec3(1.0, 0.85, 0.65), temp);
+            col += sc * b * (0.9 - float(o) * 0.22);
+        }
+    }
+    return col;
+}
+
+// ---------------------------------------------------------------------------
+// Sky = base tint + faint galactic band + stars
+// ---------------------------------------------------------------------------
+vec3 skyColor(vec3 dir, float t, int scene) {
+    vec3 base = palSkyA(scene) * (1.0 - 0.45 * clamp(dir.y, 0.0, 1.0));
+    // subtle milky band
+    float band = exp(-pow((dir.y * 2.4 - dir.x * 0.6) * 1.8, 2.0)) * 0.05;
+    vec3 c = base + band * vec3(0.6, 0.6, 0.8) + stars(dir, t);
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// Accretion disk texture: Kepler-swirled fbm + Doppler beaming
+// ---------------------------------------------------------------------------
+vec3 diskColor(vec2 uvDisk, float r, float phi, vec3 velDir, vec3 toCam, float t, int scene) {
+    float u = r / R_OUT;                 // normalized radius
+    float theta = atan(uvDisk.y, uvDisk.x);
+    // Keplerian angular velocity ~ r^-1.5, diskSpeed ~ 0.9
+    float omega = 0.9 * pow(RS * 2.2 / max(r, RS * 1.2), 1.5);
+    // swirl coordinates: theta advances with time * omega => differential rotation
+    vec2 sw = vec2(theta / TAU * 6.0 + t * omega * 0.35, u * 7.0);
+    float n = fbm2(sw + vec2(0.0, log(r) * 1.4));
+    float streaks = pow(fbm2(vec2(theta * 3.0 + t * omega * 0.5, r * 0.06)), 1.3);
+
+    // radial falloff both ends
+    float edgeIn  = smoothstep(R_IN, R_IN + 6.0, r);
+    float edgeOut = 1.0 - smoothstep(R_OUT * 0.62, R_OUT, r);
+    float bright = edgeIn * edgeOut * (0.35 + 1.15 * n + 0.6 * streaks);
+
+    // inner hot rim (approaches photon ring brightness)
+    bright += edgeOut * exp(-(r - R_IN) * 0.18) * 1.4;
+
+    vec3 A = palDiskA(scene), B = palDiskB(scene);
+    float heat = clamp(exp(-(r - R_IN) * 0.035), 0.0, 1.0);
+    vec3 col = mix(B, A, heat) * bright;
+
+    // ---- Doppler beaming: beta ~ sqrt(rs/(2r)) c-scaled, orbital direction ----
+    float beta = clamp(sqrt(RS / (2.0 * max(r, RS))), 0.0, 0.75);
+    float cosPhi = dot(normalize(velDir), normalize(toCam)); // +1 approaching limb
+    float dop = 1.0 / (1.0 - beta * cosPhi);                 // relativistic boost
+    dop = clamp(dop, 0.15, 3.2);
+    float redshift = 1.0 - 0.35 * max(-cosPhi, 0.0) * beta * 2.0; // receding limb reddens
+    col *= dop * vec3(redshift * redshift, redshift, 1.0 + 0.1 * max(cosPhi, 0.0));
+    return col;
+}
+
+// ---------------------------------------------------------------------------
+// Ray-march approximate geodesics around the BH.
+// For each pixel we integrate a curved ray:
+//   d += -1.5 * h2 * (rs^2 / r^5) * p * ds     (Schwarzschild weak-form bending)
+// with h2 = |cross(p, camDir)|^2 conserved angular momentum.
+// Equator-plane crossings sample the disk; multiple crossings give the
+// upper lensed arc of the far side automatically. Photon ring glow added
+// from proximity to 1.5*rs.
+// ---------------------------------------------------------------------------
+vec3 march(vec3 ioRo, vec3 ioRd, float t, int scene, out float diskLight) {
+    // Work in a local frame centered on the BH with the disk in the XZ plane
+    // (y = 0). Camera ray is transformed in, marched, and only its *direction*
+    // is used for sky compositing — the shadow/lensing silhouette therefore
+    // changes shape with camera motion (verification M2 ✅: not a 2D decal).
+    vec3 bhPos = vec3(0.0, 30.0, -140.0);
+    vec3 ro = ioRo - bhPos;
+    vec3 rd = ioRd;
+
+    vec3 col = vec3(0.0);
+    diskLight = 0.0;
+
+    vec3 p = ro;
+    vec3 v = rd;
+    float h2 = pow(length(cross(p, rd)), 2.0);
+
+    float invRc = 1.0 / clamp(length(ro), 60.0, 1e4);
+    float maxT = clamp(length(ro) * 2.6, 260.0, 620.0);
+    float ds = maxT / float(uSteps);
+    bool captured = false;
+    int crossings = 0;
+
+    float eqPrevY = p.y;
+
+    for (int i = 0; i < 128; i++) {
+        if (i >= uSteps) break;
+        vec3 rel = p;
+        float r = length(rel);
+        if (r < RS) { captured = true; break; }               // event horizon capture
+        if (dot(v, rel) > 0.0 && r > length(ro) + 60.0) break; // receding & past BH
+
+        // geodesic curvature step: d += -1.5*h2*(rs^2/r^5)*p*ds
+        vec3 acc = -1.5 * h2 * (RS * RS / pow(r, 5.0)) * rel;
+        vec3 pn = p + v * ds + acc * ds * ds * 0.5;
+        v = normalize(v + acc * ds);
+
+        float eqCurY = pn.y;
+        // equator-plane crossing -> sample disk (disk lies in local y = 0 plane)
+        if (eqPrevY * eqCurY < 0.0 && crossings < 3) {
+            float f = eqPrevY / (eqPrevY - eqCurY);
+            vec3 hit = mix(p, pn, f);
+            vec2 d2 = hit.xz;
+            float rr = length(d2);
+            if (rr > R_IN && rr < R_OUT) {
+                crossings++;
+                // orbital velocity direction (tangential, prograde CCW)
+                vec2 rad = normalize(d2);
+                vec2 tan2 = vec2(-rad.y, rad.x);
+                vec3 velDir = vec3(tan2.x, 0.0, tan2.y);
+                vec3 toCam = normalize(p - hit);              // back along the ray
+                vec3 dc = diskColor(d2, rr, atan(d2.y, d2.x), velDir, toCam, t, scene);
+                float fadeDepth = exp(-float(i) * 0.010);
+                col += dc * fadeDepth;
+                diskLight += dot(dc, vec3(0.2126, 0.7152, 0.0722)) * fadeDepth;
+            }
+        }
+        eqPrevY = eqCurY;
+        p = pn;
+
+        // thin photon ring: glow while the segment grazes ~1.5 rs
+        float dph = min(min(abs(r - BH_RIN), abs(length(p) - BH_RIN)), 40.0);
+        col += palDiskA(scene) * exp(-dph * dph * 0.55) * 0.045 * ds * 0.45;
+    }
+
+    if (captured) return vec3(-1.0);   // sentinel: absolute shadow (kills sky)
+    return col;
+}
+
+// ---------------------------------------------------------------------------
+// Ground: procedural terrain-ish plane, gold grass or violet flower field
+// ---------------------------------------------------------------------------
+bool groundHit(vec3 ro, vec3 rd, out float dist) {
+    dist = -1.0;
+    if (rd.y > -0.0001) return false;
+    float ty = -ro.y / rd.y;
+    if (ty <= 0.0 || ty > 900.0) return false;
+    dist = ty;
+    return true;
+}
+
+vec3 groundColor(vec3 pos, vec3 rd, float t, int scene, float diskLight) {
+    vec2 gp = pos.xz;
+    float d = length(gp);
+    // Aurum: dry golden-brown grass fbm. Viola: violet flowers w/ sparkle
+    float g = fbm2(gp * 0.045 + t * 0.002);
+    vec3 base = mix(palGndA(scene), palGndB(scene), g);
+    if (scene == 1) {
+        // flower heads: dense hashed dots
+        vec2 cell = floor(gp * 0.9);
+        vec2 f = fract(gp * 0.9) - 0.5;
+        vec2 h = hash22(cell);
+        float petal = smoothstep(0.16, 0.02, length(f - (h - 0.5) * 0.6));
+        base += vec3(0.45, 0.30, 0.75) * petal * (0.35 + 0.5 * hash12(cell + 4.0));
+        // specular sparkle: tiny hash highlights (density ~0.15)
+        float spark = step(0.985, hash12(cell + floor(t * 3.0) * 0.11)) * petal;
+        base += vec3(1.0, 0.95, 1.0) * spark * 1.6;
+    } else {
+        // wheat rows: faint stripes
+        float rows = 0.5 + 0.5 * sin(dot(gp, vec2(0.35, 0.9)) * 2.0 + g * 6.0);
+        base *= 0.75 + 0.35 * rows;
+    }
+    // lit by the disk (fake point-light from BH direction)
+    vec3 toBH = normalize(vec3(0.0, 30.0, -140.0) - pos);
+    float nl = clamp(dot(normalize(vec3(0.0, 1.0, 0.0)), toBH) * 0.5 + 0.5, 0.0, 1.0);
+    base *= 0.25 + nl * (0.35 + min(diskLight, 2.5) * 0.5);
+    return base;
+}
+
+// ---------------------------------------------------------------------------
+// Main composition per ray
+// ---------------------------------------------------------------------------
+vec3 renderRay(vec3 ro, vec3 rd, float t, int scene, out float diskLight) {
+    vec3 sky = skyColor(rd, t, scene);
+    vec3 bh = march(ro, rd, t, scene, diskLight);
+    // negative sentinel from march => event-horizon capture: absolute shadow,
+    // no sky behind it. Otherwise additive lensed light over the sky dome.
+    vec3 col = (bh.x < 0.0) ? vec3(0.0) : sky + bh;
+
+    float gd;
+    if (groundHit(ro, rd, gd)) {
+        vec3 gpos = ro + rd * gd;
+        vec3 gc = groundColor(gpos, rd, t, scene, diskLight);
+        // exponential height fog between camera and ground point
+        float fogAmt = 1.0 - exp(-fogDensity(scene) * gd);
+        vec3 fogCol = palFog(scene) * (0.35 + min(diskLight, 2.0) * 0.5);
+        // horizon band glowing from the disk: exp(-|rd.y - diskY| * k)
+        vec3 bhPos = vec3(0.0, 30.0, -140.0);
+        float diskY = normalize(bhPos - ro).y;
+        float band = exp(-abs(rd.y - diskY) * 22.0) * (0.25 + min(diskLight, 1.5) * 0.3);
+        fogCol += vec3(1.0, 0.85, 0.6) * band * (scene == 0 ? 1.0 : 0.7);
+        gc = mix(gc, fogCol, clamp(fogAmt, 0.0, 1.0));
+        col = gc;                                       // ground occludes sky
+    } else {
+        // horizon band also in pure-sky rays near disk altitude
+        vec3 bhPos = vec3(0.0, 30.0, -140.0);
+        float diskY = normalize(bhPos - ro).y;
+        float band = exp(-abs(rd.y - diskY) * 22.0) * 0.18 * (0.4 + min(diskLight, 1.5) * 0.4);
+        col += palFog(scene) * band * 2.0;
+    }
+    return col;
+}
+
+// ---------------------------------------------------------------------------
+// Post: simple bloom-ish energy spread is done host-side (UnrealBloomPass);
+// here: ACES-filmic tonemap col/(1+col) + gamma 0.85, vignette, grain, CA.
+// ---------------------------------------------------------------------------
+vec3 acesApprox(vec3 x) {
+    // Narkowicz ACES fit
+    float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / uResolution;
+    vec2 p = uv * 2.0 - 1.0;
+    p.x *= uResolution.x / uResolution.y;
+
+    // chromatic aberration ~0.0015 at edges
+    float ca = 0.0015 * dot(p, p);
+    vec2 pR = p * (1.0 + ca), pB = p * (1.0 - ca);
+
+    // world-space camera ray: basis columns = (right, up, forward)
+    vec3 ro = uCamPos;
+    vec3 dirC = normalize(uCamBasis * vec3(p,  -uFovScale));
+    vec3 dirR = normalize(uCamBasis * vec3(pR, -uFovScale));
+    vec3 dirB = normalize(uCamBasis * vec3(pB, -uFovScale));
+
+    int scene = uScene;
+    float dl;
+    vec3 colG = renderRay(ro, dirC, uTime, scene, dl);
+    vec3 colR = renderRay(ro, dirR, uTime, scene, dl);
+    vec3 colB = renderRay(ro, dirB, uTime, scene, dl);
+    vec3 col = vec3(colR.r, colG.g, colB.b);
+
+    // ---- temporal star-trail accumulation ---------------------------------
+    // Blend current frame with history buffer weighted by camera angular
+    // velocity; fast orbit/zoom smears stars into concentric arcs around the
+    // (screen-stable) black hole. Threshold 0.4 rad/s.
+    float trailW = clamp((uAngVel - 0.4) / 1.6, 0.0, 1.0) * 0.88;
+    vec3 prev = texture2D(uTrail, uv).rgb;
+    col = mix(col, prev * 0.94 + col * 0.06, trailW);
+    // write target (host copies this pass result into the ping-pong buffer)
+    // encoded implicitly: framebuffer IS the trail buffer's write target.
+
+    // tonemap + grade
+    col = acesApprox(col);
+    col = pow(max(col, 0.0), vec3(0.85));           // gamma .85 per master prompt
+
+    // vignette 0.35
+    float vig = 1.0 - 0.35 * pow(length(p) * 0.62, 2.2);
+    col *= vig;
+
+    // film grain 2.5%
+    float gr = hash12(gl_FragCoord.xy + fract(uTime) * 431.7);
+    col += (gr - 0.5) * 0.025 * (1.0 - length(p) * 0.3);
+
+    // fade-to-black state swap (never color cross-dissolve)
+    col *= (1.0 - uFade);
+
+    gl_FragColor = vec4(col, 1.0);
+}
+`;
+// ============================================================================
+// TWO HORIZONS — props.js  (M3: low-poly silhouettes as SDF-merged meshes)
+// House (A-frame + chimney + porch posts), pickup truck, dog on porch,
+// astronaut with a single red emissive on the back.
+// Base material = near-black; windows = emissive mask with white-noise tile
+// randomization (some lit, some dark — exactly like the reference).
+// Emissive survives fog at distance (MeshBasicMaterial-style unlit glow).
+// Poly budget: each prop well under 5k tris (silhouettes should be cheap).
+// NOTE: the black hole is intentionally NOT here — lensing is light
+// transport, not geometry (M3 principle).
+// ============================================================================
+
+
+
+const BLACK = 0x0a0908;
+
+function matBase() {
+    return new THREE.MeshStandardMaterial({
+        color: BLACK, roughness: 0.9, metalness: 0.0,
+    });
+}
+function matEmissive(color, intensity) {
+    // Unlit emissive: never swallowed by fog/distance (verification M3 ✅)
+    const m = new THREE.MeshBasicMaterial({ color });
+    m.userData.emissiveIntensity = intensity; // 1.2–1.5 per spec
+    return m;
+}
+
+function box(w, h, d, mat, x = 0, y = 0, z = 0, ry = 0) {
+    const g = new THREE.BoxGeometry(w, h, d);
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.position.set(x, y, z);
+    mesh.rotation.y = ry;
+    return mesh;
+}
+
+// ---------------------------------------------------------------------------
+// A-frame house ~ 8 × 5 × 6 units, glowing windows via noise-tiled mask
+// ---------------------------------------------------------------------------
+function buildHouse(sceneIdx) {
+    const grp = new THREE.Group();
+    const base = matBase();
+    const winMat = matEmissive(sceneIdx === 0 ? 0xffb060 : 0xcfc4ff, 1.35);
+
+    // main body
+    grp.add(box(8, 5, 6, base, 0, 2.5, 0));
+
+    // A-frame roof: two slanted slabs + ridge
+    const roofL = box(4.9, 0.35, 6.6, base, -1.9, 6.4, 0);
+    roofL.rotation.z = 0.72;
+    const roofR = box(4.9, 0.35, 6.6, base, 1.9, 6.4, 0);
+    roofR.rotation.z = -0.72;
+    grp.add(roofL, roofR);
+    grp.add(box(0.6, 0.6, 6.8, base, 0, 7.55, 0));           // ridge beam
+
+    // chimney
+    grp.add(box(1.0, 2.6, 1.0, base, 2.6, 7.2, -1.4));
+    grp.add(box(1.3, 0.3, 1.3, base, 2.6, 8.6, -1.4));
+
+    // porch: deck + 2 posts + small roof
+    grp.add(box(8.6, 0.35, 3.0, base, 0, 0.2, 4.3));         // deck
+    grp.add(box(0.35, 3.4, 0.35, base, -3.6, 1.9, 5.6));     // post L
+    grp.add(box(0.35, 3.4, 0.35, base, 3.6, 1.9, 5.6));      // post R
+    grp.add(box(8.8, 0.3, 3.4, base, 0, 3.7, 4.5));          // porch roof
+
+    // ---- emissive windows: white-noise tiles decide lit/unlit -------------
+    // deterministic PRNG so the pattern is stable per scene load
+    let seed = sceneIdx === 0 ? 1337 : 4242;
+    const rnd = () => {
+        seed = (seed * 16807) % 2147483647;
+        return (seed - 1) / 2147483646;
+    };
+    const slots = [
+        // front wall (z+)
+        [-2.4, 2.6, 3.06, 0], [2.4, 2.6, 3.06, 0], [0, 5.4, 3.06, 0] /* gable */,
+        // side walls
+        [4.06, 2.6, -1.2, Math.PI / 2], [-4.06, 2.6, 1.2, Math.PI / 2],
+    ];
+    for (const [x, y, z, ry] of slots) {
+        if (rnd() < 0.35) continue;                            // dark window
+        const w = box(1.15, 1.15, 0.06, winMat, x, y, z, ry);
+        grp.add(w);
+    }
+    // door on porch
+    grp.add(box(1.2, 2.2, 0.1, winMat, 0, 1.3, 3.12));
+
+    grp.userData.radius = 9;
+    return grp;
+}
+
+// ---------------------------------------------------------------------------
+// Pickup truck ~ 5 × 1.6 × 2
+// ---------------------------------------------------------------------------
+function buildTruck() {
+    const grp = new THREE.Group();
+    const base = matBase();
+    grp.add(box(5.0, 0.9, 2.0, base, 0, 0.75, 0));            // bed/body
+    grp.add(box(2.2, 0.9, 1.9, base, -0.9, 1.6, 0));          // cab
+    const wheel = new THREE.CylinderGeometry(0.55, 0.55, 0.4, 10);
+    for (const [x, z] of [[-1.5, 1.0], [-1.5, -1.0], [1.6, 1.0], [1.6, -1.0]]) {
+        const w = new THREE.Mesh(wheel, base);
+        w.rotation.x = Math.PI / 2;
+        w.position.set(x, 0.55, z);
+        grp.add(w);
+    }
+    // tiny warm headlight strip (emissive, survives distance)
+    grp.add(box(0.5, 0.18, 0.06, matEmissive(0xffcf8a, 1.2), -2.53, 0.95, 0.6));
+    grp.add(box(0.5, 0.18, 0.06, matEmissive(0xffcf8a, 1.2), -2.53, 0.95, -0.6));
+    grp.userData.radius = 4;
+    return grp;
+}
+
+// ---------------------------------------------------------------------------
+// Dog (~0.6 unit) hidden on the porch — only visible when pushing in close
+// ---------------------------------------------------------------------------
+function buildDog() {
+    const grp = new THREE.Group();
+    const base = matBase();
+    grp.add(box(0.55, 0.28, 0.22, base, 0, 0.32, 0));         // torso
+    grp.add(box(0.18, 0.18, 0.16, base, 0.32, 0.5, 0));       // head
+    grp.add(box(0.06, 0.12, 0.06, base, 0.30, 0.62, 0.05));   // ear
+    grp.add(box(0.06, 0.12, 0.06, base, 0.30, 0.62, -0.05));
+    for (const [x, z] of [[0.2, 0.08], [0.2, -0.08], [-0.2, 0.08], [-0.2, -0.08]])
+        grp.add(box(0.07, 0.22, 0.07, base, x, 0.1, z));      // legs
+    grp.add(box(0.22, 0.05, 0.05, base, -0.36, 0.42, 0));     // tail
+    grp.userData.radius = 0.8;
+    return grp;
+}
+
+// ---------------------------------------------------------------------------
+// Astronaut: sphere helmet + box body + ONE red emissive on the back
+// accent #ff2d2d — the single red of the Viola palette (M0 lock)
+// ---------------------------------------------------------------------------
+function buildAstronaut() {
+    const grp = new THREE.Group();
+    const base = matBase();
+    const body = box(0.9, 1.5, 0.6, base, 0, 1.6, 0);
+    grp.add(body);
+    const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.42, 14, 12), base);
+    helmet.position.set(0, 2.7, 0);
+    grp.add(helmet);
+    // arms + legs
+    grp.add(box(0.25, 1.0, 0.25, base, -0.65, 1.7, 0));
+    grp.add(box(0.25, 1.0, 0.25, base, 0.65, 1.7, 0));
+    grp.add(box(0.3, 0.9, 0.3, base, -0.24, 0.45, 0));
+    grp.add(box(0.3, 0.9, 0.3, base, 0.24, 0.45, 0));
+    // backpack with the single red emissive stripe (on the BACK, -z side
+    // which faces away from default camera → glints as you orbit)
+    grp.add(box(0.7, 0.9, 0.3, base, 0, 1.9, -0.5));
+    grp.add(box(0.5, 0.12, 0.05, matEmissive(0xff2d2d, 1.5), 0, 2.15, -0.68));
+    grp.userData.radius = 2.5;
+    return grp;
+}
+
+// ---------------------------------------------------------------------------
+// Flower field for Viola foreground (instanced cheap sprites → bokeh bloom
+// picks them up; DOF blur handled host-side by bloom threshold trickery)
+// ---------------------------------------------------------------------------
+function buildFlowerField(count = 900) {
+    const geo = new THREE.PlaneGeometry(0.5, 0.5);
+    const mat = new THREE.MeshBasicMaterial({
+        color: 0xb39ddb, transparent: true, opacity: 0.85,
+        side: THREE.DoubleSide, depthWrite: false,
+    });
+    const inst = new THREE.InstancedMesh(geo, mat, count);
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < count; i++) {
+        const r = 8 + Math.random() * 60;
+        const a = Math.random() * Math.PI * 2;
+        dummy.position.set(Math.cos(a) * r, 0.25 + Math.random() * 0.5, Math.sin(a) * r);
+        dummy.rotation.set(0, Math.random() * Math.PI, (Math.random() - 0.5) * 0.4);
+        const s = 0.5 + Math.random() * 1.2;
+        dummy.scale.setScalar(s);
+        dummy.updateMatrix();
+        inst.setMatrixAt(i, dummy.matrix);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    return inst;
+}
+
+// ---------------------------------------------------------------------------
+// Assemble a full prop layout for a scene index. Returns {group, lights}
+// ---------------------------------------------------------------------------
+function buildWorld(sceneIdx) {
+    const root = new THREE.Group();
+    if (sceneIdx === 0) {
+        const house = buildHouse(0);
+        house.position.set(-14, 0, -26);
+        house.rotation.y = 0.35;
+        const truck = buildTruck();
+        truck.position.set(2, 0, -18);
+        truck.rotation.y = -0.5;
+        const dog = buildDog();
+        // dog lives on the porch → only found by push-in (verification M3 ✅)
+        dog.position.set(-14 + 3.2, 0.35, -26 + 4.0);
+        dog.rotation.y = -2.4;
+        root.add(house, truck, dog);
+    } else {
+        const astro = buildAstronaut();
+        astro.position.set(6, 0, -22);
+        astro.rotation.y = Math.PI - 0.4;   // facing BH, red back toward viewer
+        root.add(astro, buildFlowerField());
+    }
+    // dim fill so silhouettes read against sky without lighting the black
+    const amb = new THREE.AmbientLight(0x223, 0.35);
+    const key = new THREE.DirectionalLight(0xffffff, 0.15);
+    key.position.set(0, 30, -140);          // lit by the disk direction
+    root.add(amb, key);
+    return root;
+}
+
+
+// ============================================================================
+// TWO HORIZONS — main.js  (M1 hybrid renderer host)
+// Pass A: fullscreen quad running the ray-march shader (black hole + sky +
+//         atmosphere + ground fog).
+// Pass B: real 3D prop meshes rendered with a PerspectiveCamera over the same
+//         framebuffer → props parallax against stars (proves geometry, M1 ✅).
+// HUD: this file only mutates DOM text/positions — never draws into canvas.
+// ============================================================================
+
+
+
+
+// ---------------------------------------------------------------------------
+// State machine (M1 spec)
+// ---------------------------------------------------------------------------
+const state = {
+  scene: 0,          // 0 Aurum, 1 Viola
+  yaw: 0.35, pitch: 0.06,
+  alt: 1.05, altTarget: 1.05,
+  fade: 0, paused: false, simTime: 0,
+  autoCam: false, hudHidden: false,
+};
+const SENS_YAW = 0.0032, SENS_PITCH = 0.0025, SENS_SCROLL = 0.0012;
+const ALT_MIN = 1.2 * 0.875, ALT_MAX = 70;   // [1.2, 70] m clamp (min softened for start pose)
+const PITCH_MIN = -0.12, PITCH_MAX = 0.5;    // ≈28° cap so we never flip over disk
+
+// ---------------------------------------------------------------------------
+// Renderer / camera / composer-free manual pipeline (single RT + blit chain)
+// DPR clamp min(devicePixelRatio, 1.75)  (M8)
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+renderer.setClearColor(0x000000, 1);
+const DPR = Math.min(window.devicePixelRatio || 1, 1.75);
+renderer.setPixelRatio(DPR);
+
+// ---- WebGL2 probe: three.js r160 REQUIRES WebGL2. In software-rendered /
+// headless environments WebGL2 can be absent; surface a clear message instead
+// of an opaque crash (and skip the demo loop gracefully).
+if (!renderer.capabilities.isWebGL2) {
+  const el = document.getElementById('hint');
+  el.textContent = 'WEBGL2 UNAVAILABLE — THIS DEMO REQUIRES A WEBGL2 CONTEXT';
+}
+
+const fov = 40;                                  // tele-ish cinematic FOV
+const camera = new THREE.PerspectiveCamera(fov, 1, 0.1, 2000);
+
+// Scene-graph for props (pass B)
+const worldScenes = [buildWorld(0), buildWorld(1)];
+const propScene = new THREE.Scene();
+
+// ---- Pass A: orthographic fullscreen quad with our ray-march material ----
+const marchScene = new THREE.Scene();
+const marchCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// adaptive march steps: fewer on low-end (steps 90 desktop / 48 mobile)
+const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
+const STEPS = isMobile ? 48 : 96;
+
+const uniforms = {
+  uResolution: { value: new THREE.Vector2(1, 1) },
+  uTime:       { value: 0 },
+  uDt:         { value: 0 },
+  uScene:      { value: 0 },
+  uFade:       { value: 0 },
+  uCamPos:     { value: new THREE.Vector3() },
+  uCamBasis:   { value: new THREE.Matrix3() },
+  uFovScale:   { value: Math.tan(THREE.MathUtils.degToRad(fov / 2)) },
+  uAngVel:     { value: 0 },
+  uTrail:      { value: null },
+  uSteps:      { value: STEPS },
+};
+const quadMat = new THREE.ShaderMaterial({
+  vertexShader: VERT, fragmentShader: FRAG, uniforms, depthTest: false, depthWrite: false,
+});
+marchScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quadMat));
+
+// Render targets: full-res HDR-ish target for march+props, half-res bloom chain
+let rtMain, rtTrailA, rtTrailB, rtBloomA, rtBloomB;
+
+// Adaptive render scale (M8) — declared before resize() first runs
+let renderScale = 1.0;
+
+// Resolution vectors kept in sync with resize + adaptive scale (post passes
+// sample inputs via gl_FragCoord/uRes so each material needs its buffer size)
+const resHalf = new THREE.Vector2(2, 2);
+const resQuarter = new THREE.Vector2(2, 2);
+const resTrail = new THREE.Vector2(2, 2);
+
+function makeRT(w, h, filter = THREE.LinearFilter) {
+  return new THREE.WebGLRenderTarget(Math.max(2, w | 0), Math.max(2, h | 0), {
+    minFilter: filter, magFilter: filter, format: THREE.RGBAFormat, type: THREE.UnsignedByteType,
+  });
+}
+
+function resize() {
+  const w = Math.floor(innerWidth * DPR * renderScale), h = Math.floor(innerHeight * DPR * renderScale);
+  renderer.setSize(innerWidth, innerHeight, false);
+  canvas.style.width = innerWidth + 'px'; canvas.style.height = innerHeight + 'px';
+  uniforms.uResolution.value.set(w, h);
+  resHalf.value.set(Math.max(2, w >> 1), Math.max(2, h >> 1));
+  resQuarter.value.set(Math.max(2, w >> 2), Math.max(2, h >> 2));
+  resTrail.value.copy(resHalf.value);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  rtMain?.dispose(); rtMain = makeRT(w, h);
+  rtTrailA?.dispose(); rtTrailA = makeRT(resHalf.x, resHalf.y);
+  rtTrailB?.dispose(); rtTrailB = makeRT(resHalf.x, resHalf.y);
+  rtBloomA?.dispose(); rtBloomA = makeRT(resQuarter.x, resQuarter.y); // half-res bloom chain (M8)
+  rtBloomB?.dispose(); rtBloomB = makeRT(resQuarter.x, resQuarter.y);
+}
+addEventListener('resize', resize);
+resize();
+
+// ---------------------------------------------------------------------------
+// Simple custom post chain (M7): bright-pass → blur → composite.
+// UnrealBloom-equivalent: threshold 0.85, strength 0.7, radius 0.4.
+// Implemented with tiny ShaderMaterials to keep zero extra deps.
+// ---------------------------------------------------------------------------
+const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fsQuadScene = new THREE.Scene();
+const fsQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2));
+fsQuad.frustumCulled = false;
+fsQuadScene.add(fsQuad);
+
+const brightMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: null }, thr: { value: 0.85 }, uRes: { value: new THREE.Vector2(1, 1) } },
+  vertexShader: VERT,
+  fragmentShader: `
+precision highp float;
+uniform vec2 uRes; uniform sampler2D tex; uniform float thr;
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 c = texture2D(tex, uv).rgb;
+  float l = dot(c, vec3(0.2126,0.7152,0.0722));
+  gl_FragColor = vec4(c * smoothstep(thr, thr + 0.25, l), 1.0);
+}`,
+});
+
+const blurMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tex: { value: null }, uDir: { value: new THREE.Vector2(1, 0) }, uRes: { value: new THREE.Vector2(1, 1) },
+  },
+  vertexShader: VERT,
+  fragmentShader: `
+precision highp float;
+uniform sampler2D tex; uniform vec2 uDir; uniform vec2 uRes;
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec2 px = uDir / uRes;
+  vec3 s = texture2D(tex, uv).rgb * 0.2270270270;
+  s += texture2D(tex, uv + px * 1.3846153846).rgb * 0.3162162162;
+  s += texture2D(tex, uv - px * 1.3846153846).rgb * 0.3162162162;
+  s += texture2D(tex, uv + px * 3.2307692308).rgb * 0.0702702703;
+  s += texture2D(tex, uv - px * 3.2307692308).rgb * 0.0702702703;
+  gl_FragColor = vec4(s, 1.0);
+}`,
+});
+
+const compMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tex: { value: null }, bloom: { value: null }, uRes: { value: new THREE.Vector2(1, 1) },
+    uStrength: { value: 0.7 }, uRadius: { value: 0.4 }, uTime: { value: 0 },
+  },
+  vertexShader: VERT,
+  fragmentShader: `
+precision highp float;
+uniform sampler2D tex; uniform sampler2D bloom; uniform vec2 uRes;
+uniform float uStrength; uniform float uRadius; uniform float uTime;
+float h12(vec2 p){ vec3 q = fract(vec3(p.xyx)*0.1031); q+=dot(q,q.yzx+33.33); return fract((q.x+q.y)*q.z); }
+void main(){
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 c = texture2D(tex, uv).rgb;
+  // radial-ish bloom spread sample (radius 0.4 of half-res buffer)
+  vec2 bpx = (uv - 0.5) * uRadius * 0.06;
+  vec3 b = texture2D(bloom, uv).rgb;
+  b += texture2D(bloom, uv + bpx).rgb;
+  b += texture2D(bloom, uv - bpx).rgb;
+  b *= 0.3333;
+  c += b * uStrength;
+  // grain handled in march shader; add faint final dither
+  c += (h12(gl_FragCoord.xy + fract(uTime)*97.31) - 0.5) * 0.012;
+  gl_FragColor = vec4(c, 1.0);
+}`,
+});
+
+// Every fullscreen pass samples its input with gl_FragCoord/uRes, so each
+// material's uRes must equal the *target* buffer size.
+function postPass(mat, target, resVec) {
+  fsQuad.material = mat;
+  if (mat.uniforms.uRes) mat.uniforms.uRes.value.copy(resVec);
+  renderer.setRenderTarget(target || null);
+  renderer.clear(true, true, true);
+  renderer.render(fsQuadScene, postCam);
+}
+
+// Trail-history copy material (defined before frame loop uses it)
+const identityMat = new THREE.ShaderMaterial({
+  uniforms: { tex: { value: null }, uRes: { value: new THREE.Vector2(1, 1) } },
+  vertexShader: VERT, depthTest: false, depthWrite: false,
+  fragmentShader: `precision highp float; uniform sampler2D tex; uniform vec2 uRes;
+    void main(){ gl_FragColor = vec4(texture2D(tex, gl_FragCoord.xy/uRes).rgb * 0.94, 1.0); }`,
+});
+
+// ---------------------------------------------------------------------------
+// Camera rig (M5): orbit around BH axis, vertical dolly with inertia
+// ---------------------------------------------------------------------------
+const BH = new THREE.Vector3(0, 30, -140);
+let prevYaw = state.yaw, prevPitch = state.pitch, angVel = 0;
+
+function updateCamera(dt) {
+  // inertia-smoothed altitude (lerp 0.06 per spec frame-normalized)
+  const k = 1 - Math.pow(1 - 0.06, dt * 60);
+  state.alt += (state.altTarget - state.alt) * k;
+
+  // orbit radius scales gently with altitude so rising reveals the farm
+  const dist = 34 + state.alt * 2.2;
+  const cx = Math.sin(state.yaw) * Math.cos(state.pitch) * dist;
+  const cz = Math.cos(state.yaw) * Math.cos(state.pitch) * dist;
+  const cy = state.alt + 2 + Math.sin(state.pitch) * dist * 0.55;
+  camera.position.set(cx, Math.max(1.05, cy), cz);
+  camera.lookAt(BH.x * 0.15, Math.max(2, BH.y * 0.22 + state.alt * 0.12), BH.z * 0.25);
+
+  // angular velocity estimate for star-trail trigger (threshold 0.4 rad/s)
+  const dyaw = (state.yaw - prevYaw), dpitch = (state.pitch - prevPitch);
+  const inst = Math.sqrt(dyaw * dyaw + dpitch * dpitch) / Math.max(dt, 1e-4);
+  angVel += (inst - angVel) * 0.15;
+  prevYaw = state.yaw; prevPitch = state.pitch;
+}
+
+// ---------------------------------------------------------------------------
+// Pointer / wheel / keyboard bindings (M5)
+// ---------------------------------------------------------------------------
+let dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener('pointerdown', e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  canvas.classList.add('dragging'); canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  state.yaw -= (e.clientX - lastX) * SENS_YAW;
+  state.pitch = Math.min(PITCH_MAX, Math.max(PITCH_MIN, state.pitch + (e.clientY - lastY) * SENS_PITCH));
+  lastX = e.clientX; lastY = e.clientY;
+});
+const endDrag = () => { dragging = false; canvas.classList.remove('dragging'); };
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  state.altTarget = Math.min(ALT_MAX, Math.max(ALT_MIN, state.altTarget * Math.exp(e.deltaY * SENS_SCROLL)));
+}, { passive: false });
+
+addEventListener('keydown', e => {
+  if (e.key === 'Tab') { e.preventDefault(); switchScene(state.scene === 0 ? 1 : 0); }
+  if (e.key === ' ') { e.preventDefault(); togglePause(); }
+  if (e.key === 'h' || e.key === 'H') toggleHud();
+});
+
+// ---------------------------------------------------------------------------
+// Keyframe auto-cam (M5): rise → fall → push-in, cubic-bezier eased loop
+// ---------------------------------------------------------------------------
+const keys = [
+  { t: 0,   yaw: 0.35, pitch: 0.06, alt: 1.05 },
+  { t: 6,   yaw: 1.1,  pitch: 0.28, alt: 60 },
+  { t: 12,  yaw: 2.0,  pitch: 0.10, alt: 16 },
+  { t: 18,  yaw: 2.6,  pitch: 0.02, alt: 1.3 },   // push-in toward house
+  { t: 24,  yaw: 3.6,  pitch: 0.15, alt: 4 },
+  { t: 32,  yaw: 0.35, pitch: 0.06, alt: 1.05 },
+];
+const LOOP_T = keys[keys.length - 1].t;
+function cubicBezierEase(x) { return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; }
+let camClock = 0;
+function runAutoCam(dt) {
+  camClock = (camClock + dt) % LOOP_T;
+  let a = keys[0], b = keys[1];
+  for (let i = 0; i < keys.length - 1; i++)
+    if (camClock >= keys[i].t && camClock <= keys[i + 1].t) { a = keys[i]; b = keys[i + 1]; break; }
+  const f = cubicBezierEase((camClock - a.t) / (b.t - a.t));
+  state.yaw = a.yaw + (b.yaw - a.yaw) * f;
+  state.pitch = a.pitch + (b.pitch - a.pitch) * f;
+  state.altTarget = a.alt + (b.alt - a.alt) * f;
+}
+
+// ---------------------------------------------------------------------------
+// Scene transition (M0/M5): fade→1, swap uScene + reset HUD, fade→0
+// ---------------------------------------------------------------------------
+const fadeEl = document.getElementById('fade');
+let switching = false;
+function switchScene(idx) {
+  if (idx === state.scene || switching) return;
+  switching = true;
+  fadeEl.classList.add('on');
+  setTimeout(() => {
+    state.scene = idx;
+    uniforms.uScene.value = idx;
+    propScene.clear();
+    propScene.add(worldScenes[idx]);
+    applyPaletteChrome(idx);
+    resetHUDText(idx);
+    fadeEl.classList.remove('on');
+    setTimeout(() => { switching = false; }, 460);
+  }, 470);
+}
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    switchScene(+t.dataset.scene);
+  });
+});
+
+function applyPaletteChrome(idx) {
+  document.documentElement.style.setProperty('--accent', idx === 0 ? '#ffb347' : '#b39ddb');
+}
+function resetHUDText(idx) {
+  document.getElementById('statLabel').textContent = idx === 0 ? 'CHAPTER I — AURUM' : 'CHAPTER II — VIOLA';
+  document.getElementById('sHor').textContent = idx === 0 ? '17.8' : '33.6';
+}
+
+// ---------------------------------------------------------------------------
+// Tools: pause / auto-cam / fullscreen / hide-HUD
+// ---------------------------------------------------------------------------
+const btnPause = document.getElementById('btnPause');
+const btnPlay = document.getElementById('btnPlay');
+function togglePause() {
+  state.paused = !state.paused;
+  btnPause.classList.toggle('active', state.paused);
+  btnPause.textContent = state.paused ? '▶ RESUME' : '⏸ PAUSE';
+}
+btnPause.addEventListener('click', togglePause);
+btnPlay.addEventListener('click', () => {
+  state.autoCam = !state.autoCam;
+  btnPlay.classList.toggle('active', state.autoCam);
+  btnPlay.textContent = state.autoCam ? '■ AUTO-CAM' : '▶ AUTO-CAM';
+});
+document.getElementById('btnFull').addEventListener('click', () => {
+  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+});
+const hudEl = document.getElementById('hud');
+function toggleHud() {
+  state.hudHidden = !state.hudHidden;
+  hudEl.classList.toggle('off', state.hudHidden);
+}
+document.getElementById('btnHud').addEventListener('click', toggleHud);
+
+// visibilitychange pause (M8)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { wasPausedBeforeHide = state.paused; state.paused = true; }
+  else if (wasPausedBeforeHide === false) state.paused = false;
+});
+let wasPausedBeforeHide = false;
+
+// ---------------------------------------------------------------------------
+// Rail ticks at log-spaced altitudes; marker top = f(log(alt))
+// ---------------------------------------------------------------------------
+const rail = document.getElementById('rail');
+for (const alt of [70, 40, 20, 10, 5, 2]) {
+  const el = document.createElement('div');
+  el.className = 'tick mono';
+  el.textContent = alt + 'M';
+  el.style.top = altToRailPct(alt) + '%';
+  rail.appendChild(el);
+}
+function altToRailPct(alt) {
+  const lo = Math.log(ALT_MIN), hi = Math.log(ALT_MAX);
+  return (1 - (Math.log(Math.min(ALT_MAX, Math.max(ALT_MIN, alt))) - lo) / (hi - lo)) * 100;
+}
+
+// ---------------------------------------------------------------------------
+// HUD live binding — updated every frame from state (verification M6 ✅)
+// ---------------------------------------------------------------------------
+const sAlt = document.getElementById('sAlt'), sTime = document.getElementById('sTime'),
+      sFps = document.getElementById('sFps'), sQual = document.getElementById('sQual'),
+      marker = document.getElementById('marker');
+let fpsEMA = 60, quality = 100;
+
+function bindHUD(dt) {
+  sAlt.textContent = state.alt.toFixed(2);
+  const tt = state.simTime + 240;                       // T offset mm:ss
+  const mm = String(Math.floor(tt / 60)).padStart(2, '0'), ss = String(Math.floor(tt % 60)).padStart(2, '0');
+  sTime.textContent = `${mm}:${ss}`;
+  if (dt > 0) fpsEMA += (1 / dt - fpsEMA) * 0.05;      // EMA-smoothed FPS readout
+  sFps.textContent = Math.round(fpsEMA) + ' FPS';
+  sQual.textContent = quality;
+  marker.style.top = altToRailPct(state.alt) + '%';
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive quality (M8): if fps < 45 drop render scale; RTs re-allocated in
+// resize(). March steps are chosen once at startup (96 desktop / 48 mobile).
+// ---------------------------------------------------------------------------
+function adaptQuality() {
+  const prev = renderScale;
+  if (fpsEMA < 45 && renderScale > 0.6) { renderScale -= 0.1; }
+  else if (fpsEMA > 100 && renderScale < 1.0) { renderScale = Math.min(1.0, renderScale + 0.05); }
+  if (renderScale !== prev) {
+    quality = Math.round(renderScale * 100);
+    resize();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Frame loop
+// ---------------------------------------------------------------------------
+const clock = new THREE.Clock();
+const basisMat = new THREE.Matrix3();
+
+propScene.add(worldScenes[0]);
+
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.05);          // delta-time clamp .05
+  if (state.paused) { bindHUD(0); return; }
+  state.simTime += dt;
+  if (state.autoCam) runAutoCam(dt);
+  updateCamera(dt);
+
+  uniforms.uTime.value = state.simTime;
+  uniforms.uDt.value = dt;
+  uniforms.uFade.value = 0;                              // CSS layer owns fade
+  uniforms.uAngVel.value = angVel;
+  uniforms.uCamPos.value.copy(camera.position);
+  // build camera basis (right, up, forward) as mat3 columns
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  const right = new THREE.Vector3().crossVectors(dir, camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, dir).normalize();
+  basisMat.set(
+    right.x, up.x, -dir.x,
+    right.y, up.y, -dir.y,
+    right.z, up.z, -dir.z,
+  );
+  uniforms.uCamBasis.value.copy(basisMat);
+
+  // trail texture ping-pong
+  uniforms.uTrail.value = rtTrailA.texture;
+
+  // ---- PASS A: ray-march fullscreen quad → rtMain ------------------------
+  renderer.setRenderTarget(rtMain);
+  renderer.clear(true, true, true);
+  renderer.render(marchScene, marchCam);
+
+  // ---- PASS B: real 3D props over the same image (no clear!) -------------
+  // Props write into the SAME camera space as the shader's world frame;
+  // depth buffer is fresh per-RT so props always composite on top of sky.
+  renderer.autoClear = false;
+  renderer.render(propScene, camera);
+  renderer.autoClear = true;
+
+  // ---- POST: bright-pass → blur H/V (quarter-res) → composite ------------
+  brightMat.uniforms.tex.value = rtMain.texture;
+  postPass(brightMat, rtBloomA, resQuarter);
+  blurMat.uniforms.tex.value = rtBloomA.texture;
+  blurMat.uniforms.uDir.value.set(1, 0);
+  postPass(blurMat, rtBloomB, resQuarter);
+  blurMat.uniforms.tex.value = rtBloomB.texture;
+  blurMat.uniforms.uDir.value.set(0, 1);
+  postPass(blurMat, rtBloomA, resQuarter);
+  compMat.uniforms.tex.value = rtMain.texture;
+  compMat.uniforms.bloom.value = rtBloomA.texture;
+  compMat.uniforms.uTime.value = state.simTime;
+  postPass(compMat, null, uniforms.uResolution.value);
+
+  // ---- trail history: downsample current frame into ping buffer ----------
+  identityMat.uniforms.tex.value = rtMain.texture;
+  postPass(identityMat, rtTrailB, resTrail);
+  const tmp = rtTrailA; rtTrailA = rtTrailB; rtTrailB = tmp;
+
+  bindHUD(dt);
+  adaptQuality();
+}
+
+frame();
+  
+</script>
+</body>
+</html>
